@@ -1,0 +1,302 @@
+name: CI/CD — Deal Engine
+
+on:
+  push:
+    branches:
+      - main        # Deploy a producción
+      - staging     # Deploy a staging
+  pull_request:
+    branches:
+      - main        # Solo CI (build + tests) en PRs, sin deploy
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+  BACKEND_IMAGE: deal-engine/backend-api
+  FRONTEND_IMAGE: deal-engine/frontend
+
+jobs:
+  # ─────────────────────────────────────────────
+  # JOB 1: Checkout y Validación
+  # ─────────────────────────────────────────────
+  validate:
+    name: Checkout & Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Validar manifiestos K8s con kubeval
+        uses: instrumenta/kubeval-action@master
+        with:
+          files: k8s/
+
+      - name: Lint YAML
+        run: |
+          pip install yamllint
+          yamllint k8s/ .github/
+
+  # ─────────────────────────────────────────────
+  # JOB 2: Build y Pruebas Unitarias
+  # ─────────────────────────────────────────────
+  test:
+    name: Build & Unit Tests
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Setup Python (backend)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias del backend
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Ejecutar pruebas unitarias
+        run: |
+          cd backend
+          pytest tests/ -v --cov=app --cov-report=xml --cov-fail-under=80
+
+      - name: Subir reporte de cobertura
+        uses: codecov/codecov-action@v4
+        with:
+          file: backend/coverage.xml
+          fail_ci_if_error: false
+
+  # ─────────────────────────────────────────────
+  # JOB 3: Escaneo de Seguridad de la Imagen
+  # ─────────────────────────────────────────────
+  security-scan:
+    name: Security Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Build imagen backend para escaneo
+        run: docker build -t backend-scan:latest ./backend
+
+      - name: Escanear imagen con Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "backend-scan:latest"
+          format: "table"
+          exit-code: "1"              # El pipeline FALLA si encuentra vulnerabilidades CRITICAL
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          severity: "CRITICAL,HIGH"
+
+      - name: Build imagen frontend para escaneo
+        run: docker build -t frontend-scan:latest ./frontend
+
+      - name: Escanear imagen frontend con Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "frontend-scan:latest"
+          format: "table"
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          severity: "CRITICAL,HIGH"
+
+  # ─────────────────────────────────────────────
+  # JOB 4: Build y Push a ECR
+  # ─────────────────────────────────────────────
+  build-push:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+    needs: security-scan
+    # Solo en push a main o staging, no en PRs
+    if: github.event_name == 'push'
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      short-sha: ${{ steps.vars.outputs.sha_short }}
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Extraer SHA corto del commit
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login a Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build y Push imagen del backend
+        run: |
+          IMAGE_TAG=${{ steps.vars.outputs.sha_short }}
+          docker build \
+            --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
+            --build-arg GIT_SHA=$IMAGE_TAG \
+            -t $ECR_REGISTRY/$BACKEND_IMAGE:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$BACKEND_IMAGE:latest \
+            ./backend
+          docker push $ECR_REGISTRY/$BACKEND_IMAGE:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$BACKEND_IMAGE:latest
+
+      - name: Build y Push imagen del frontend
+        run: |
+          IMAGE_TAG=${{ steps.vars.outputs.sha_short }}
+          docker build \
+            -t $ECR_REGISTRY/$FRONTEND_IMAGE:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$FRONTEND_IMAGE:latest \
+            ./frontend
+          docker push $ECR_REGISTRY/$FRONTEND_IMAGE:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$FRONTEND_IMAGE:latest
+
+  # ─────────────────────────────────────────────
+  # JOB 5: Deploy a Staging
+  # ─────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-push
+    environment: staging  # Entorno protegido en GitHub Settings
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configurar kubeconfig para EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name deal-engine-eks \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deploy a namespace staging
+        run: |
+          IMAGE_TAG=${{ needs.build-push.outputs.short-sha }}
+
+          # Actualiza la imagen en el deployment de staging
+          kubectl set image deployment/backend-api \
+            backend-api=$ECR_REGISTRY/$BACKEND_IMAGE:$IMAGE_TAG \
+            --namespace=staging
+
+          kubectl set image deployment/frontend \
+            frontend=$ECR_REGISTRY/$FRONTEND_IMAGE:$IMAGE_TAG \
+            --namespace=staging
+
+          # Espera a que el rolling update termine (máx 3 min)
+          kubectl rollout status deployment/backend-api --namespace=staging --timeout=180s
+          kubectl rollout status deployment/frontend --namespace=staging --timeout=180s
+
+      - name: Smoke test en staging
+        run: |
+          # Prueba básica de que la app responde en staging
+          STAGING_URL="https://staging.deal-engine.com"
+          curl --fail --max-time 10 "$STAGING_URL/health" || exit 1
+          echo "Staging smoke test passed"
+
+  # ─────────────────────────────────────────────
+  # JOB 6: Gate Manual → Deploy a Producción
+  # Solo en push a main
+  # ─────────────────────────────────────────────
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    # environment: production → Requiere aprobación manual en GitHub
+    # El reviewer ve el smoke test de staging antes de aprobar
+    environment: production
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configurar kubeconfig para EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name deal-engine-eks \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Guardar revisión actual (para rollback)
+        id: pre-deploy
+        run: |
+          CURRENT_REV=$(kubectl rollout history deployment/backend-api \
+            --namespace=production | tail -1 | awk '{print $1}')
+          echo "current-revision=$CURRENT_REV" >> $GITHUB_OUTPUT
+
+      - name: Deploy a namespace production
+        run: |
+          IMAGE_TAG=${{ needs.build-push.outputs.short-sha }}
+
+          kubectl set image deployment/backend-api \
+            backend-api=$ECR_REGISTRY/$BACKEND_IMAGE:$IMAGE_TAG \
+            --namespace=production
+
+          kubectl set image deployment/frontend \
+            frontend=$ECR_REGISTRY/$FRONTEND_IMAGE:$IMAGE_TAG \
+            --namespace=production
+
+          kubectl rollout status deployment/backend-api --namespace=production --timeout=300s
+          kubectl rollout status deployment/frontend --namespace=production --timeout=300s
+
+      - name: Health check post-deploy
+        run: |
+          PROD_URL="https://app.deal-engine.com"
+          curl --fail --max-time 10 "$PROD_URL/health" || exit 1
+          echo "Production health check passed"
+
+  # ─────────────────────────────────────────────
+  # JOB 7: Rollback (se activa manualmente)
+  # workflow_dispatch permite ejecutarlo desde la UI de GitHub
+  # ─────────────────────────────────────────────
+  rollback:
+    name: Rollback Production
+    runs-on: ubuntu-latest
+    # Solo se ejecuta manualmente (no en push/PR)
+    if: github.event_name == 'workflow_dispatch'
+    environment: production
+    steps:
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configurar kubeconfig para EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name deal-engine-eks \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Ejecutar rollback al deploy anterior
+        run: |
+          echo "Ejecutando rollback en producción..."
+          kubectl rollout undo deployment/backend-api --namespace=production
+          kubectl rollout undo deployment/frontend --namespace=production
+
+          kubectl rollout status deployment/backend-api --namespace=production --timeout=180s
+          kubectl rollout status deployment/frontend --namespace=production --timeout=180s
+
+          echo "Rollback completado exitosamente"

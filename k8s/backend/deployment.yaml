@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-api
+  namespace: production
+  labels:
+    app: backend-api
+    tier: backend
+    version: "1.0.0"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: backend-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # Levanta 1 pod nuevo antes de bajar uno viejo
+      maxUnavailable: 0  # Garantiza que siempre hay 3 pods disponibles durante el deploy
+  template:
+    metadata:
+      labels:
+        app: backend-api
+        tier: backend
+    spec:
+      # No corre como root
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+
+      containers:
+        - name: backend-api
+          image: <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/deal-engine/backend-api:latest
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 8080
+              name: http
+
+          # Variables no-sensibles desde ConfigMap
+          envFrom:
+            - configMapRef:
+                name: backend-config
+
+          # Variables sensibles desde Secret
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secrets
+                  key: db-password
+            - name: API_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secrets
+                  key: api-secret-key
+
+          resources:
+            requests:
+              cpu: "250m"    # 0.25 vCPU garantizado
+              memory: "256Mi"
+            limits:
+              cpu: "500m"    # Máximo 0.5 vCPU
+              memory: "512Mi"
+
+          # Kubernetes pregunta: ¿está vivo el pod?
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+
+          # Kubernetes pregunta: ¿está listo para recibir tráfico?
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+          securityContext:
+            readOnlyRootFilesystem: true  # El container no puede escribir en /
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL  # Elimina todos los Linux capabilities
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp   # Único directorio escribible
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      # Distribuye los pods en distintos nodos para alta disponibilidad
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: backend-api

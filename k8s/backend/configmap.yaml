@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: production
+data:
+  # Variables de entorno NO sensibles
+  APP_ENV: "production"
+  APP_PORT: "8080"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"          # JSON para que CloudWatch pueda parsear estructurado
+  DB_HOST: "deal-engine-db.cluster.us-east-1.rds.amazonaws.com"
+  DB_PORT: "5432"
+  DB_NAME: "dealengine_prod"
+  ALLOWED_ORIGINS: "https://app.deal-engine.com"
+  MAX_CONNECTIONS: "100"
+  REQUEST_TIMEOUT: "30s"

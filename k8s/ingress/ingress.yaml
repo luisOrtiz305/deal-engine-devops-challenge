@@ -1,0 +1,57 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: deal-engine-ingress
+  namespace: production
+  annotations:
+    # cert-manager emite y renueva el certificado TLS automáticamente
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+    # Rate limiting: máximo 100 req/seg por IP para proteger la API
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+
+    # Headers de seguridad
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "Strict-Transport-Security: max-age=31536000; includeSubDomains";
+      more_set_headers "X-XSS-Protection: 1; mode=block";
+
+    # Fuerza HTTPS
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+
+    # Tamaño máximo de body (protege contra uploads maliciosos)
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+
+    # Timeouts
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.deal-engine.com
+      secretName: deal-engine-tls   # cert-manager crea este Secret automáticamente
+  rules:
+    - host: app.deal-engine.com
+      http:
+        paths:
+          # Tráfico /api/* → backend
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-api
+                port:
+                  name: http
+          # Tráfico /* → frontend
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  name: http
