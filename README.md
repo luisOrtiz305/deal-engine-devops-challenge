@@ -253,7 +253,7 @@ Cada pod expone dos endpoints:
 deal-engine-devops/
 ├── README.md                          ← Este archivo
 ├── architecture/
-│   └── diagram.mmd                    ← Diagrama Mermaid (renderiza en GitHub)
+│   └── diagrama.png                    ← Diagrama Lucidchart
 ├── k8s/
 │   ├── namespaces.yaml
 │   ├── backend/
@@ -291,5 +291,5 @@ deal-engine-devops/
 
 ## Autor
 
-Luis Angel Ortiz Ramos — [@luisortiz](https://github.com/luisortiz)  
+Luis Angel Ortiz Ramos
 Candidato DevOps Jr | Deal Engine Interview Challenge
