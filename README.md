@@ -28,7 +28,6 @@ Diseño de arquitectura de despliegue para la plataforma de tickets de viaje de 
 
 Arquitectura de referencia para despliegue en AWS con EKS, RDS Multi-AZ, CI/CD y observabilidad.
 
-> Ver diagrama completo en [`architecture/diagram.mmd`](architecture/diagram.mmd)
 
 ---
 
