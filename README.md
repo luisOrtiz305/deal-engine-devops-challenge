@@ -292,4 +292,5 @@ deal-engine-devops/
 ## Autor
 
 Luis Angel Ortiz Ramos
+
 Candidato DevOps Jr | Deal Engine Interview Challenge
