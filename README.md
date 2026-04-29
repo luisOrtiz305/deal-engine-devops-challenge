@@ -24,37 +24,9 @@ Diseño de arquitectura de despliegue para la plataforma de tickets de viaje de 
 
 ## Arquitectura de Alto Nivel
 
-```mermaid
-graph TB
-    subgraph Internet
-        USER["👤 User / Agency / Airline"]
-    end
+![Architecture Diagram](./architecture/diagrama.png)
 
-    subgraph AWS["AWS — us-east-1"]
-        subgraph VPC["VPC 10.0.0.0/16"]
-            subgraph PublicSubnets["Subnets Públicas (10.0.1.0/24, 10.0.2.0/24)"]
-                ALB["Application Load Balancer\n(HTTPS :443)"]
-                NATGW["NAT Gateway"]
-            end
-            subgraph PrivateSubnets["Subnets Privadas (10.0.10.0/24, 10.0.11.0/24)"]
-                subgraph EKS["EKS Cluster"]
-                    INGRESS["NGINX Ingress\n(TLS termination)"]
-                    FE["frontend Pods\n(2 réplicas)"]
-                    BE["backend-api Pods\n(3-10 réplicas / HPA)"]
-                    PROM["Prometheus + Grafana"]
-                end
-                RDS[("RDS PostgreSQL\nMulti-AZ")]
-            end
-        end
-        ECR["ECR Registry"]
-        CW["CloudWatch"]
-    end
-
-    USER -->|HTTPS| ALB --> INGRESS
-    INGRESS -->|"/*"| FE
-    INGRESS -->|"/api/*"| BE
-    BE --> RDS
-```
+Arquitectura de referencia para despliegue en AWS con EKS, RDS Multi-AZ, CI/CD y observabilidad.
 
 > Ver diagrama completo en [`architecture/diagram.mmd`](architecture/diagram.mmd)
 
